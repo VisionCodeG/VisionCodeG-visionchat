@@ -7,20 +7,21 @@
 - [x] Tinode SDK connection
 - [x] Dockerized Tinode + PostgreSQL
 - [x] Windows one-click development launcher
-- [ ] Registration flow
-- [ ] Replace demo chat list with live Tinode subscriptions
-- [ ] Real message send/receive
-- [ ] User profile and avatar
+- [x] Registration flow
+- [x] Replace demo chat list with live Tinode subscriptions
+- [x] Real P2P message send/receive
+- [x] User search by login/email
+- [x] User profile identity in UI
 
 ## Phase 2 — daily messenger
 - [ ] Group creation and management
 - [ ] File and image attachments
 - [ ] Voice messages
 - [ ] Message edit/delete/reply/forward
-- [ ] Search
-- [ ] Typing and presence
+- [ ] Search inside messages
+- [ ] Typing and read indicators
 - [ ] Push notifications
-- [ ] Russian-first localization
+- [ ] Full Russian localization pass
 
 ## Phase 3 — calls and clients
 - [ ] TURN/STUN deployment
@@ -32,6 +33,7 @@
 
 ## Phase 4 — security and production
 - [ ] Generate unique production API keys
+- [ ] Replace default server encryption/token keys
 - [ ] TLS and reverse proxy
 - [ ] Harden database credentials
 - [ ] Backups
