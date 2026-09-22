@@ -4,13 +4,12 @@ services:
     container_name: visionchat-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-tinode}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
     volumes:
       - visionchat_pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-tinode}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d postgres"]
       interval: 5s
       timeout: 5s
       retries: 15
@@ -23,7 +22,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      POSTGRES_DSN: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-tinode}?sslmode=disable&connect_timeout=10"
+      POSTGRES_DSN: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${TINODE_DB:-tinode}?sslmode=disable&connect_timeout=10"
       WAIT_FOR: "postgres:5432"
       DEFAULT_COUNTRY_CODE: "TJ"
       DEBUG_EMAIL_VERIFICATION_CODE: "${DEBUG_EMAIL_VERIFICATION_CODE:-123456}"
