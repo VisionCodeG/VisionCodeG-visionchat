@@ -1,0 +1,35 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.visioncodeg.visionchat'
+    compileSdk 36
+
+    defaultConfig {
+        applicationId 'com.visioncodeg.visionchat'
+        minSdk 27
+        targetSdk 36
+        versionCode 1
+        versionName '0.1.0'
+
+        // Android emulator -> Windows host.
+        // For a physical phone replace 10.0.2.2 with the LAN IP of the PC/server.
+        buildConfigField 'String', 'VISIONCHAT_URL',
+                '"http://10.0.2.2:5173/?tinode=10.0.2.2:6060&secure=false"'
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.7.1'
+    implementation 'androidx.core:core:1.17.0'
+}
