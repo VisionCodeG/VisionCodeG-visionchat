@@ -9,6 +9,16 @@ if (!root || password == null) {
   process.exit(2);
 }
 
+if (!fs.existsSync(root)) {
+  console.error('Tinode root does not exist: ' + root);
+  process.exit(4);
+}
+
+if (!fs.statSync(root).isDirectory()) {
+  console.error('Tinode root is not a directory: ' + root);
+  process.exit(5);
+}
+
 function walk(dir, out = []) {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name);
