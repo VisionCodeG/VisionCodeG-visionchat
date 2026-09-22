@@ -4,3 +4,4 @@ dist/
 .DS_Store
 .vscode/
 npm-debug.log*
+.native/
