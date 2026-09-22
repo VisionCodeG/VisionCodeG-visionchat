@@ -1,5 +1,6 @@
 import React, { useMemo, useRef, useState } from 'react';
 import { Drafty, Tinode } from 'tinode-sdk';
+import CallPanel from './components/CallPanel.jsx';
 import MessageBody from './components/MessageBody.jsx';
 import { attachmentLabel, contentText, imageDimensions } from './lib/media.js';
 import { createTinodeClient, tinodeConfig } from './lib/tinode.js';
@@ -58,6 +59,9 @@ export default function App() {
   const discardRecordingRef = useRef(false);
   const typingTimersRef = useRef({});
   const lastTypingSentRef = useRef(0);
+  const callRef = useRef(null);
+  const callInfoHandlerRef = useRef(null);
+  const callInfoQueueRef = useRef([]);
 
   const [serverState, setServerState] = useState('offline');
   const [authOpen, setAuthOpen] = useState(false);
@@ -97,6 +101,7 @@ export default function App() {
   const [searchError, setSearchError] = useState('');
   const [groupName, setGroupName] = useState('');
   const [groupMembers, setGroupMembers] = useState([]);
+  const [call, setCall] = useState(null);
 
   const authorized = serverState === 'authorized';
 
@@ -117,6 +122,36 @@ export default function App() {
   const activeMessages = messages[selected] || [];
   const typingNow = Boolean(selected && typingByTopic[selected]);
 
+  function updateCall(next) {
+    callRef.current = next;
+    setCall(next);
+  }
+
+  function releaseCallMedia(callValue = callRef.current) {
+    callValue?.stream?.getTracks?.().forEach((track) => {
+      try {
+        track.stop();
+      } catch {
+        // Ignore already-stopped media tracks.
+      }
+    });
+  }
+
+  function closeCallLocal() {
+    releaseCallMedia();
+    callInfoQueueRef.current = [];
+    callInfoHandlerRef.current = null;
+    updateCall(null);
+  }
+
+  function registerCallInfoHandler(handler) {
+    callInfoHandlerRef.current = handler;
+    if (handler && callInfoQueueRef.current.length) {
+      const queued = callInfoQueueRef.current.splice(0);
+      queued.forEach((info) => handler(info));
+    }
+  }
+
   function ensureClient() {
     if (!tinodeRef.current) {
       const client = createTinodeClient();
@@ -124,6 +159,7 @@ export default function App() {
       client.onDisconnect = (err) => {
         if (currentUserRef.current) setServerState('offline');
         if (err?.message) setAuthError(err.message);
+        if (callRef.current) closeCallLocal();
       };
 
       tinodeRef.current = client;
@@ -227,6 +263,9 @@ export default function App() {
     };
     me.onContactUpdate = () => refreshChats(client);
     me.onSubsUpdated = () => refreshChats(client);
+
+    client.onDataMessage = handleGlobalDataMessage;
+    client.onInfoMessage = handleGlobalInfoMessage;
 
     if (!me.isSubscribed()) {
       await me.subscribe(
@@ -580,6 +619,175 @@ export default function App() {
     }
   }
 
+  function handleGlobalDataMessage(data) {
+    if (
+      !data?.head?.webrtc ||
+      data.head.webrtc !== 'started' ||
+      !Tinode.isP2PTopicName(data.topic) ||
+      data.from === currentUserRef.current
+    ) {
+      return;
+    }
+
+    const client = tinodeRef.current;
+    const topic = client?.getTopic(data.topic);
+    if (!topic) return;
+
+    if (callRef.current) {
+      try {
+        topic.videoCall('hang-up', data.seq);
+      } catch {
+        // Ignore failure to reject a second concurrent call.
+      }
+      return;
+    }
+
+    try {
+      topic.videoCall('ringing', data.seq);
+    } catch {
+      // Ringing is a best-effort signal.
+    }
+
+    updateCall({
+      topic: data.topic,
+      seq: data.seq,
+      state: 'incoming',
+      direction: 'incoming',
+      audioOnly: Boolean(data.head.aonly),
+      stream: null,
+    });
+  }
+
+  function handleGlobalInfoMessage(info) {
+    if (!info || info.what !== 'call') return;
+
+    const currentCall = callRef.current;
+    if (!currentCall || info.topic !== currentCall.topic) return;
+
+    if (info.event === 'accept' && currentCall.direction === 'outgoing') {
+      updateCall({ ...currentCall, state: 'active' });
+    } else if (info.event === 'hang-up') {
+      closeCallLocal();
+      return;
+    }
+
+    if (callInfoHandlerRef.current) {
+      callInfoHandlerRef.current(info);
+    } else {
+      callInfoQueueRef.current.push(info);
+    }
+  }
+
+  async function startCall(audioOnly) {
+    if (!selected || !authorized) return;
+
+    if (!Tinode.isP2PTopicName(selected)) {
+      setAuthError('Звонки сейчас доступны только в личных чатах');
+      return;
+    }
+
+    if (callRef.current) {
+      setAuthError('Другой звонок уже активен');
+      return;
+    }
+
+    setBusy(true);
+    setAuthError('');
+
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: !audioOnly,
+      });
+
+      const { topic } = await ensureWritableTopic();
+      const pub = topic.createMessage(Drafty.videoCall(audioOnly), false);
+      pub.head = {
+        ...(pub.head || {}),
+        webrtc: 'started',
+        aonly: Boolean(audioOnly),
+      };
+
+      const ctrl = await topic.publishMessage(pub);
+      const seq = ctrl?.params?.seq;
+      if (!seq) throw new Error('Сервер не вернул ID звонка');
+
+      updateCall({
+        topic: selected,
+        seq,
+        state: 'outgoing',
+        direction: 'outgoing',
+        audioOnly: Boolean(audioOnly),
+        stream,
+      });
+    } catch (err) {
+      stream?.getTracks?.().forEach((track) => track.stop());
+      setAuthError(err?.message || 'Не удалось начать звонок');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function acceptIncomingCall() {
+    const currentCall = callRef.current;
+    if (!currentCall || currentCall.state !== 'incoming') return;
+
+    setBusy(true);
+    setAuthError('');
+
+    let stream;
+    try {
+      await openChat(currentCall.topic, false);
+      const topic = tinodeRef.current?.getTopic(currentCall.topic);
+      if (!topic) throw new Error('Чат звонка недоступен');
+
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: !currentCall.audioOnly,
+      });
+
+      await topic.videoCall('accept', currentCall.seq);
+      updateCall({
+        ...currentCall,
+        state: 'active',
+        stream,
+      });
+    } catch (err) {
+      stream?.getTracks?.().forEach((track) => track.stop());
+      setAuthError(err?.message || 'Не удалось принять звонок');
+      rejectIncomingCall();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function rejectIncomingCall() {
+    const currentCall = callRef.current;
+    if (!currentCall) return;
+
+    try {
+      tinodeRef.current?.getTopic(currentCall.topic)?.videoCall('hang-up', currentCall.seq);
+    } catch {
+      // Ignore signaling errors while rejecting.
+    }
+
+    closeCallLocal();
+  }
+
+  function hangupCall() {
+    const currentCall = callRef.current;
+    if (!currentCall) return;
+
+    try {
+      tinodeRef.current?.getTopic(currentCall.topic)?.videoCall('hang-up', currentCall.seq);
+    } catch {
+      // Local cleanup must still happen.
+    }
+
+    closeCallLocal();
+  }
+
   async function ensureWritableTopic() {
     const client = tinodeRef.current;
     if (!client || !selected) throw new Error('Чат не выбран');
@@ -854,6 +1062,7 @@ export default function App() {
 
   function logout() {
     if (recording) stopRecording(true);
+    if (callRef.current) hangupCall();
 
     if (tinodeRef.current) {
       try {
@@ -1013,8 +1222,20 @@ export default function App() {
                 </span>
               </div>
               <div className="header-actions">
-                <button disabled title="Аудиозвонок — следующий этап">☎</button>
-                <button disabled title="Видеозвонок — следующий этап">◫</button>
+                <button
+                  disabled={busy || Boolean(call) || !Tinode.isP2PTopicName(activeChat.topic)}
+                  title="Аудиозвонок"
+                  onClick={() => startCall(true)}
+                >
+                  ☎
+                </button>
+                <button
+                  disabled={busy || Boolean(call) || !Tinode.isP2PTopicName(activeChat.topic)}
+                  title="Видеозвонок"
+                  onClick={() => startCall(false)}
+                >
+                  ◫
+                </button>
                 <button title="ID чата" onClick={() => navigator.clipboard?.writeText(activeChat.topic)}>i</button>
               </div>
             </header>
@@ -1184,6 +1405,36 @@ export default function App() {
           </section>
         )}
       </main>
+
+      {call && call.state !== 'incoming' && call.stream && (
+        <CallPanel
+          client={tinodeRef.current}
+          call={call}
+          title={chats.find((item) => item.topic === call.topic)?.name || 'VisionChat'}
+          registerInfoHandler={registerCallInfoHandler}
+          onHangup={hangupCall}
+          onRemoteEnd={closeCallLocal}
+          onError={setAuthError}
+        />
+      )}
+
+      {call?.state === 'incoming' && (
+        <div className="modal-backdrop call-incoming-backdrop">
+          <div className="incoming-call-card">
+            <div className="incoming-pulse">
+              {(chats.find((item) => item.topic === call.topic)?.name || 'V').slice(0, 1).toUpperCase()}
+            </div>
+            <span>{call.audioOnly ? 'Входящий аудиозвонок' : 'Входящий видеозвонок'}</span>
+            <h2>{chats.find((item) => item.topic === call.topic)?.name || 'VisionChat user'}</h2>
+            <div className="incoming-call-actions">
+              <button type="button" className="reject-call" onClick={rejectIncomingCall}>Отклонить</button>
+              <button type="button" className="accept-call" onClick={acceptIncomingCall} disabled={busy}>
+                {busy ? 'Подключение…' : 'Принять'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {authOpen && (
         <div className="modal-backdrop" onMouseDown={() => !busy && setAuthOpen(false)}>
