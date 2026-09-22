@@ -26,6 +26,8 @@ services:
       POSTGRES_DSN: "postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-tinode}?sslmode=disable&connect_timeout=10"
       WAIT_FOR: "postgres:5432"
       DEFAULT_COUNTRY_CODE: "TJ"
+      DEBUG_EMAIL_VERIFICATION_CODE: "${DEBUG_EMAIL_VERIFICATION_CODE:-123456}"
+      SAMPLE_DATA: ""
     ports:
       - "6060:6060"
 
