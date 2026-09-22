@@ -43,11 +43,18 @@ export function dataUrl(data) {
 
 export function absoluteTinodeUrl(ref) {
   if (!ref) return null;
-  try {
-    return new URL(ref, tinodeConfig.httpBase).toString();
-  } catch {
-    return null;
+  if (/^https?:\/\//i.test(ref)) return ref;
+
+  if (tinodeConfig.mediaBase) {
+    try {
+      return new URL(ref, tinodeConfig.mediaBase).toString();
+    } catch {
+      return null;
+    }
   }
+
+  // During local Vite development relative /v0 URLs are proxied to Tinode.
+  return ref;
 }
 
 function authHeaders(client) {
