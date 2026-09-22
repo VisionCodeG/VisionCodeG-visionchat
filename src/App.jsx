@@ -1,29 +1,17 @@
 import React, { useMemo, useRef, useState } from 'react';
 import { Drafty, Tinode } from 'tinode-sdk';
+import MessageBody from './components/MessageBody.jsx';
+import { attachmentLabel, contentText, imageDimensions } from './lib/media.js';
 import { createTinodeClient, tinodeConfig } from './lib/tinode.js';
 
 const P2P_MODE = 'JRWPS';
 const MESSAGE_PAGE = 48;
+const FALLBACK_UPLOAD_LIMIT = 32 * 1024 * 1024;
 
 function safeName(value, fallback = 'Без имени') {
   if (!value) return fallback;
   if (typeof value === 'string') return value;
   return value.fn || value.name || fallback;
-}
-
-function messageToText(content) {
-  if (!content) return '';
-  if (typeof content === 'string') return content;
-  if (typeof content.txt === 'string') return content.txt;
-
-  try {
-    const preview = Drafty.preview(content, 500);
-    if (typeof preview === 'string') return preview;
-    if (preview && typeof preview.txt === 'string') return preview.txt;
-  } catch {
-    // Ignore malformed rich content and show a generic label below.
-  }
-  return 'Сообщение';
 }
 
 function formatTime(value) {
@@ -50,10 +38,26 @@ function normalizeSearchQuery(raw) {
   return query;
 }
 
+function statusMark(status) {
+  if (status >= Tinode.MESSAGE_STATUS_READ) return '✓✓';
+  if (status >= Tinode.MESSAGE_STATUS_RECEIVED) return '✓✓';
+  if (status >= Tinode.MESSAGE_STATUS_SENT) return '✓';
+  return '•';
+}
+
 export default function App() {
   const tinodeRef = useRef(null);
   const currentUserRef = useRef(null);
   const selectedRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
+  const recordingStreamRef = useRef(null);
+  const recordingChunksRef = useRef([]);
+  const recordingStartedAtRef = useRef(0);
+  const recordingTimerRef = useRef(null);
+  const discardRecordingRef = useRef(false);
+  const typingTimersRef = useRef({});
+  const lastTypingSentRef = useRef(0);
 
   const [serverState, setServerState] = useState('offline');
   const [authOpen, setAuthOpen] = useState(false);
@@ -76,12 +80,23 @@ export default function App() {
   const [messages, setMessages] = useState({});
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(null);
+
+  const [replying, setReplying] = useState(null);
+  const [editingSeq, setEditingSeq] = useState(null);
+  const [typingByTopic, setTypingByTopic] = useState({});
+
+  const [recording, setRecording] = useState(false);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
 
   const [newChatOpen, setNewChatOpen] = useState(false);
+  const [newChatMode, setNewChatMode] = useState('person');
   const [userQuery, setUserQuery] = useState('');
   const [userResults, setUserResults] = useState([]);
   const [searchBusy, setSearchBusy] = useState(false);
   const [searchError, setSearchError] = useState('');
+  const [groupName, setGroupName] = useState('');
+  const [groupMembers, setGroupMembers] = useState([]);
 
   const authorized = serverState === 'authorized';
 
@@ -99,17 +114,16 @@ export default function App() {
     [chats, selected],
   );
 
+  const activeMessages = messages[selected] || [];
+  const typingNow = Boolean(selected && typingByTopic[selected]);
+
   function ensureClient() {
     if (!tinodeRef.current) {
       const client = createTinodeClient();
 
       client.onDisconnect = (err) => {
-        if (currentUserRef.current) {
-          setServerState('offline');
-        }
-        if (err?.message) {
-          setAuthError(err.message);
-        }
+        if (currentUserRef.current) setServerState('offline');
+        if (err?.message) setAuthError(err.message);
       };
 
       tinodeRef.current = client;
@@ -126,11 +140,19 @@ export default function App() {
       await client.connect();
     }
 
-    if (!client.isAuthenticated()) {
-      setServerState('online');
-    }
-
+    if (!client.isAuthenticated()) setServerState('online');
     return client;
+  }
+
+  function setRemoteTyping(topicName, value) {
+    setTypingByTopic((current) => ({ ...current, [topicName]: value }));
+    clearTimeout(typingTimersRef.current[topicName]);
+
+    if (value) {
+      typingTimersRef.current[topicName] = setTimeout(() => {
+        setTypingByTopic((current) => ({ ...current, [topicName]: false }));
+      }, 3500);
+    }
   }
 
   function syncTopicMessages(topic) {
@@ -141,12 +163,15 @@ export default function App() {
 
     topic.messages((msg) => {
       if (!msg || msg.head?.webrtc) return;
+
       next.push({
         seq: msg.seq,
         from: msg.from,
         mine: msg.from === ownId,
-        text: messageToText(msg.content),
+        content: msg.content,
+        head: msg.head || {},
         time: formatTime(msg.ts),
+        status: msg.from === ownId ? topic.msgStatus(msg, true) : Tinode.MESSAGE_STATUS_TO_ME,
       });
     });
 
@@ -198,9 +223,7 @@ export default function App() {
     const me = client.getMeTopic();
 
     me.onMetaDesc = (desc) => {
-      if (desc?.public) {
-        setProfileName(safeName(desc.public, userId));
-      }
+      if (desc?.public) setProfileName(safeName(desc.public, userId));
     };
     me.onContactUpdate = () => refreshChats(client);
     me.onSubsUpdated = () => refreshChats(client);
@@ -226,15 +249,45 @@ export default function App() {
   }
 
   function attachTopicCallbacks(topic) {
-    topic.onData = () => {
+    if (!topic) return;
+
+    topic.onData = (msg) => {
       syncTopicMessages(topic);
       refreshChats();
+
+      if (
+        msg &&
+        selectedRef.current === topic.name &&
+        msg.from !== currentUserRef.current &&
+        msg.seq
+      ) {
+        try {
+          topic.noteRead(msg.seq);
+        } catch {
+          // Reading notification is best-effort.
+        }
+      }
     };
+
     topic.onMetaDesc = () => {
       refreshChats();
       syncTopicMessages(topic);
     };
+
     topic.onSubsUpdated = () => refreshChats();
+    topic.onPres = () => refreshChats();
+
+    topic.onInfo = (info) => {
+      if (!info) return;
+
+      if (['kp', 'kpa', 'kpv'].includes(info.what) && info.from !== currentUserRef.current) {
+        setRemoteTyping(topic.name, true);
+      }
+
+      if (info.what === 'read' || info.what === 'recv') {
+        syncTopicMessages(topic);
+      }
+    };
   }
 
   async function subscribeTopic(topic, createP2P = false) {
@@ -243,6 +296,7 @@ export default function App() {
         await topic.getMeta(
           topic.startMetaQuery()
             .withLaterDesc()
+            .withLaterSub()
             .withLaterData(MESSAGE_PAGE)
             .build(),
         );
@@ -252,7 +306,7 @@ export default function App() {
       return topic.name;
     }
 
-    let getQuery = topic.startMetaQuery()
+    const getQuery = topic.startMetaQuery()
       .withLaterDesc()
       .withLaterSub()
       .withLaterData(MESSAGE_PAGE);
@@ -285,11 +339,20 @@ export default function App() {
 
       selectedRef.current = actualName;
       setSelected(actualName);
+      setReplying(null);
+      setEditingSeq(null);
       syncTopicMessages(actualTopic);
       refreshChats(client);
 
-      if (!chats.some((chat) => chat.topic === actualName)) {
-        setChats((current) => [
+      try {
+        actualTopic.noteRead();
+      } catch {
+        // Read receipt is best-effort.
+      }
+
+      setChats((current) => {
+        if (current.some((chat) => chat.topic === actualName)) return current;
+        return [
           {
             topic: actualName,
             name: safeName(actualTopic.public, actualName),
@@ -297,9 +360,9 @@ export default function App() {
             online: false,
             touched: new Date(),
           },
-          ...current.filter((chat) => chat.topic !== actualName),
-        ]);
-      }
+          ...current,
+        ];
+      });
     } catch (err) {
       setAuthError(err?.message || 'Не удалось открыть чат');
     } finally {
@@ -346,18 +409,10 @@ export default function App() {
       const cleanName = fullName.trim();
       const cleanEmail = email.trim().toLowerCase();
 
-      if (cleanLogin.length < 4) {
-        throw new Error('Логин должен содержать минимум 4 символа');
-      }
-      if (password.length < 6) {
-        throw new Error('Пароль должен содержать минимум 6 символов');
-      }
-      if (!cleanName) {
-        throw new Error('Укажи имя');
-      }
-      if (!cleanEmail.includes('@')) {
-        throw new Error('Укажи корректный email');
-      }
+      if (cleanLogin.length < 4) throw new Error('Логин должен содержать минимум 4 символа');
+      if (password.length < 6) throw new Error('Пароль должен содержать минимум 6 символов');
+      if (!cleanName) throw new Error('Укажи имя');
+      if (!cleanEmail.includes('@')) throw new Error('Укажи корректный email');
 
       const client = await connect();
       const ctrl = await client.createAccountBasic(cleanLogin, password, {
@@ -400,21 +455,11 @@ export default function App() {
         resp: verifyCode.trim(),
       });
 
-      let ctrl;
-      if (pendingAuth.token) {
-        ctrl = await client.loginToken(pendingAuth.token, cred);
-      } else {
-        ctrl = await client.loginBasic(
-          pendingAuth.login,
-          pendingAuth.password,
-          cred,
-        );
-      }
+      const ctrl = pendingAuth.token
+        ? await client.loginToken(pendingAuth.token, cred)
+        : await client.loginBasic(pendingAuth.login, pendingAuth.password, cred);
 
-      if (ctrl?.code >= 300) {
-        throw new Error(ctrl.text || 'Код подтверждения не принят');
-      }
-
+      if (ctrl?.code >= 300) throw new Error(ctrl.text || 'Код подтверждения не принят');
       await finishAuthentication(client);
     } catch (err) {
       setAuthError(err?.message || 'Неверный код подтверждения');
@@ -472,26 +517,116 @@ export default function App() {
     await openChat(user, true);
   }
 
+  function toggleGroupMember(user) {
+    setGroupMembers((current) => {
+      if (current.some((item) => item.user === user.user)) {
+        return current.filter((item) => item.user !== user.user);
+      }
+      return [...current, user];
+    });
+  }
+
+  async function createGroup(event) {
+    event.preventDefault();
+    if (!authorized) return;
+
+    const cleanName = groupName.trim();
+    if (!cleanName) {
+      setSearchError('Укажи название группы');
+      return;
+    }
+
+    setBusy(true);
+    setSearchError('');
+
+    try {
+      const client = tinodeRef.current;
+      const tempName = client.newGroupTopicName(false);
+      const topic = client.getTopic(tempName);
+      attachTopicCallbacks(topic);
+
+      const getQuery = topic.startMetaQuery()
+        .withLaterDesc()
+        .withLaterSub()
+        .withLaterData(MESSAGE_PAGE);
+
+      const ctrl = await topic.subscribe(getQuery.build(), {
+        desc: {
+          public: { fn: cleanName },
+          defacs: { auth: P2P_MODE, anon: 'N' },
+        },
+      });
+
+      const actualName = ctrl?.topic || topic.name;
+      const actualTopic = client.getTopic(actualName);
+      attachTopicCallbacks(actualTopic);
+
+      for (const member of groupMembers) {
+        await actualTopic.invite(member.user, null);
+      }
+
+      setNewChatOpen(false);
+      setNewChatMode('person');
+      setGroupName('');
+      setGroupMembers([]);
+      setUserQuery('');
+      setUserResults([]);
+      refreshChats(client);
+      await openChat(actualName, false);
+    } catch (err) {
+      setSearchError(err?.message || 'Не удалось создать группу');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function ensureWritableTopic() {
+    const client = tinodeRef.current;
+    if (!client || !selected) throw new Error('Чат не выбран');
+
+    const topic = client.getTopic(selected);
+    attachTopicCallbacks(topic);
+
+    if (!topic.isSubscribed()) {
+      await subscribeTopic(topic, false);
+    }
+
+    return { client, topic };
+  }
+
+  async function publishContent(content, head) {
+    const { client, topic } = await ensureWritableTopic();
+    const pub = topic.createMessage(content, false);
+
+    if (head) {
+      pub.head = { ...(pub.head || {}), ...head };
+    }
+
+    await topic.publishMessage(pub);
+    syncTopicMessages(topic);
+    refreshChats(client);
+  }
+
   async function sendMessage(event) {
     event.preventDefault();
     const text = draft.trim();
     if (!text || !selected || !authorized) return;
 
     setBusy(true);
+    setAuthError('');
 
     try {
-      const client = tinodeRef.current;
-      const topic = client.getTopic(selected);
-      attachTopicCallbacks(topic);
-
-      if (!topic.isSubscribed()) {
-        await subscribeTopic(topic, false);
+      let head;
+      if (editingSeq) {
+        head = { replace: `:${editingSeq}` };
+      } else if (replying?.seq) {
+        head = { reply: String(replying.seq) };
       }
 
-      await topic.publish(text);
+      await publishContent(Drafty.parse(text), head);
       setDraft('');
-      syncTopicMessages(topic);
-      refreshChats(client);
+      setEditingSeq(null);
+      setReplying(null);
     } catch (err) {
       setAuthError(err?.message || 'Не удалось отправить сообщение');
     } finally {
@@ -499,7 +634,227 @@ export default function App() {
     }
   }
 
+  function handleDraftChange(event) {
+    const value = event.target.value;
+    setDraft(value);
+
+    if (!value || !selected || !authorized) return;
+
+    const now = Date.now();
+    if (now - lastTypingSentRef.current < 2500) return;
+    lastTypingSentRef.current = now;
+
+    try {
+      const topic = tinodeRef.current?.getTopic(selected);
+      if (topic?.isSubscribed()) topic.noteKeyPress();
+    } catch {
+      // Typing notification is best-effort.
+    }
+  }
+
+  async function sendAttachment(file) {
+    if (!file || !selected || !authorized) return;
+
+    setBusy(true);
+    setAuthError('');
+    setUploadProgress(0);
+
+    try {
+      const { client } = await ensureWritableTopic();
+      const maxUpload = Number(
+        client.getServerParam?.(Tinode.MAX_FILE_UPLOAD_SIZE, FALLBACK_UPLOAD_LIMIT),
+      ) || FALLBACK_UPLOAD_LIMIT;
+
+      if (file.size > maxUpload) {
+        throw new Error(`Файл слишком большой. Лимит сервера: ${Math.round(maxUpload / 1024 / 1024)} MB`);
+      }
+
+      const uploader = client.getLargeFileHelper();
+      if (!uploader) throw new Error('Сервер не поддерживает загрузку файлов');
+
+      const refurl = await uploader.upload(
+        file,
+        null,
+        (progress) => setUploadProgress(Math.round(progress * 100)),
+      );
+
+      let content;
+      if (file.type.startsWith('image/')) {
+        const { width, height } = await imageDimensions(file);
+        content = Drafty.insertImage(null, 0, {
+          mime: file.type || 'image/jpeg',
+          refurl,
+          width,
+          height,
+          filename: file.name,
+          size: file.size,
+        });
+      } else {
+        content = Drafty.attachFile(null, {
+          mime: file.type || 'application/octet-stream',
+          refurl,
+          filename: file.name,
+          size: file.size,
+        });
+      }
+
+      await publishContent(content);
+    } catch (err) {
+      setAuthError(err?.message || 'Не удалось отправить файл');
+    } finally {
+      setBusy(false);
+      setUploadProgress(null);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  }
+
+  async function sendVoiceBlob(blob, durationMs) {
+    if (!blob || blob.size === 0) return;
+
+    setBusy(true);
+    setUploadProgress(0);
+
+    try {
+      const { client } = await ensureWritableTopic();
+      const uploader = client.getLargeFileHelper();
+      if (!uploader) throw new Error('Сервер не поддерживает загрузку аудио');
+
+      const refurl = await uploader.upload(
+        blob,
+        null,
+        (progress) => setUploadProgress(Math.round(progress * 100)),
+      );
+
+      const content = Drafty.appendAudio(null, {
+        mime: blob.type || 'audio/webm',
+        refurl,
+        size: blob.size,
+        duration: durationMs,
+      });
+
+      await publishContent(content);
+    } catch (err) {
+      setAuthError(err?.message || 'Не удалось отправить голосовое');
+    } finally {
+      setBusy(false);
+      setUploadProgress(null);
+    }
+  }
+
+  async function startRecording() {
+    if (!selected || !authorized || recording) return;
+
+    setAuthError('');
+
+    try {
+      if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+        throw new Error('Этот браузер не поддерживает запись голоса');
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      recordingStreamRef.current = stream;
+      recordingChunksRef.current = [];
+      discardRecordingRef.current = false;
+
+      const preferred = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus'];
+      const mimeType = preferred.find((type) => MediaRecorder.isTypeSupported(type));
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      mediaRecorderRef.current = recorder;
+      recordingStartedAtRef.current = Date.now();
+
+      recorder.ondataavailable = (event) => {
+        if (event.data?.size) recordingChunksRef.current.push(event.data);
+      };
+
+      recorder.onstop = () => {
+        clearInterval(recordingTimerRef.current);
+        setRecording(false);
+        setRecordingSeconds(0);
+
+        const duration = Date.now() - recordingStartedAtRef.current;
+        const blob = new Blob(recordingChunksRef.current, {
+          type: recorder.mimeType || 'audio/webm',
+        });
+
+        recordingChunksRef.current = [];
+        recordingStreamRef.current?.getTracks().forEach((track) => track.stop());
+        recordingStreamRef.current = null;
+
+        if (!discardRecordingRef.current) {
+          sendVoiceBlob(blob, duration);
+        }
+      };
+
+      recorder.start(250);
+      setRecording(true);
+      setRecordingSeconds(0);
+
+      recordingTimerRef.current = setInterval(() => {
+        setRecordingSeconds(Math.floor((Date.now() - recordingStartedAtRef.current) / 1000));
+      }, 500);
+
+      const topic = tinodeRef.current?.getTopic(selected);
+      if (topic?.isSubscribed()) topic.noteRecording(true);
+    } catch (err) {
+      setAuthError(err?.message || 'Не удалось включить микрофон');
+    }
+  }
+
+  function stopRecording(discard = false) {
+    discardRecordingRef.current = discard;
+    const recorder = mediaRecorderRef.current;
+
+    if (recorder && recorder.state !== 'inactive') {
+      recorder.stop();
+    }
+  }
+
+  function beginReply(message) {
+    setReplying({
+      seq: message.seq,
+      text: attachmentLabel(message.content),
+    });
+    setEditingSeq(null);
+  }
+
+  function beginEdit(message) {
+    const text = contentText(message.content);
+    if (!text) {
+      setAuthError('Редактирование вложений пока не поддерживается');
+      return;
+    }
+
+    setDraft(text);
+    setEditingSeq(message.seq);
+    setReplying(null);
+  }
+
+  function cancelComposerMode() {
+    setReplying(null);
+    setEditingSeq(null);
+    setDraft('');
+  }
+
+  async function deleteMessage(message) {
+    if (!message?.seq || !selected) return;
+
+    const hardDelete = message.mine
+      ? window.confirm('Удалить сообщение для всех?\nOK — для всех, Отмена — только у себя.')
+      : false;
+
+    try {
+      const topic = tinodeRef.current?.getTopic(selected);
+      if (!topic) return;
+      await topic.delMessagesList([message.seq], hardDelete);
+      syncTopicMessages(topic);
+    } catch (err) {
+      setAuthError(err?.message || 'Не удалось удалить сообщение');
+    }
+  }
+
   function logout() {
+    if (recording) stopRecording(true);
+
     if (tinodeRef.current) {
       try {
         tinodeRef.current.disconnect();
@@ -520,6 +875,8 @@ export default function App() {
     setServerState('offline');
     setAuthError('');
     setNewChatOpen(false);
+    setReplying(null);
+    setEditingSeq(null);
   }
 
   async function copyMyId() {
@@ -536,6 +893,16 @@ export default function App() {
     setAuthStep('form');
     setAuthError('');
     setAuthOpen(true);
+  }
+
+  function resetNewChat() {
+    setNewChatOpen(false);
+    setNewChatMode('person');
+    setUserQuery('');
+    setUserResults([]);
+    setSearchError('');
+    setGroupName('');
+    setGroupMembers([]);
   }
 
   return (
@@ -641,7 +1008,9 @@ export default function App() {
             <header className="conversation-header">
               <div>
                 <h1>{activeChat.name}</h1>
-                <span>{activeChat.online ? 'в сети' : activeChat.topic}</span>
+                <span className={typingNow ? 'typing-status' : ''}>
+                  {typingNow ? 'печатает…' : activeChat.online ? 'в сети' : activeChat.topic}
+                </span>
               </div>
               <div className="header-actions">
                 <button disabled title="Аудиозвонок — следующий этап">☎</button>
@@ -653,34 +1022,140 @@ export default function App() {
             <section className="messages">
               <div className="day-pill">VisionChat</div>
 
-              {(messages[selected] || []).length === 0 && (
+              {activeMessages.length === 0 && (
                 <div className="empty-conversation">
                   <div className="empty-icon">✦</div>
                   <h2>Начни разговор</h2>
-                  <p>Сообщения здесь уже отправляются через Tinode, а не через демонстрационный массив.</p>
+                  <p>Можно писать, отправлять фото, файлы и голосовые сообщения.</p>
                 </div>
               )}
 
-              {(messages[selected] || []).map((message) => (
-                <div
-                  className={message.mine ? 'message mine' : 'message'}
-                  key={message.seq ?? `${message.from}-${message.time}-${message.text}`}
-                >
-                  <p>{message.text}</p>
-                  <time>{message.time}</time>
-                </div>
-              ))}
+              {activeMessages.map((message) => {
+                const replyTarget = message.head?.reply
+                  ? activeMessages.find((item) => String(item.seq) === String(message.head.reply))
+                  : null;
+
+                return (
+                  <div
+                    className={message.mine ? 'message mine' : 'message'}
+                    key={message.seq ?? `${message.from}-${message.time}`}
+                  >
+                    <div className="message-actions">
+                      <button type="button" title="Ответить" onClick={() => beginReply(message)}>↩</button>
+                      {message.mine && (
+                        <button type="button" title="Редактировать" onClick={() => beginEdit(message)}>✎</button>
+                      )}
+                      <button type="button" title="Удалить" onClick={() => deleteMessage(message)}>⌫</button>
+                    </div>
+
+                    {replyTarget && (
+                      <button
+                        type="button"
+                        className="message-reply-preview"
+                        onClick={() => document.getElementById(`msg-${replyTarget.seq}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })}
+                      >
+                        <strong>Ответ</strong>
+                        <span>{attachmentLabel(replyTarget.content)}</span>
+                      </button>
+                    )}
+
+                    <div id={`msg-${message.seq}`}>
+                      <MessageBody
+                        content={message.content}
+                        client={tinodeRef.current}
+                        onError={setAuthError}
+                      />
+                    </div>
+
+                    <div className="message-meta">
+                      {message.head?.replace && <span className="edited-mark">изменено</span>}
+                      <time>{message.time}</time>
+                      {message.mine && (
+                        <span
+                          className={message.status >= Tinode.MESSAGE_STATUS_READ ? 'delivery-status read' : 'delivery-status'}
+                          title={
+                            message.status >= Tinode.MESSAGE_STATUS_READ
+                              ? 'Прочитано'
+                              : message.status >= Tinode.MESSAGE_STATUS_RECEIVED
+                                ? 'Доставлено'
+                                : 'Отправлено'
+                          }
+                        >
+                          {statusMark(message.status)}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
             </section>
 
+            {(replying || editingSeq) && (
+              <div className="composer-context">
+                <div>
+                  <strong>{editingSeq ? 'Редактирование' : 'Ответ'}</strong>
+                  <span>
+                    {editingSeq
+                      ? 'Измени текст и отправь снова'
+                      : replying?.text}
+                  </span>
+                </div>
+                <button type="button" onClick={cancelComposerMode}>×</button>
+              </div>
+            )}
+
+            {uploadProgress !== null && (
+              <div className="upload-progress">
+                <div style={{ width: `${uploadProgress}%` }} />
+                <span>Загрузка {uploadProgress}%</span>
+              </div>
+            )}
+
+            {recording && (
+              <div className="recording-bar">
+                <span className="recording-dot" />
+                <strong>Запись {recordingSeconds} сек.</strong>
+                <button type="button" onClick={() => stopRecording(true)}>Отмена</button>
+                <button type="button" className="recording-send" onClick={() => stopRecording(false)}>Отправить</button>
+              </div>
+            )}
+
             <form className="composer" onSubmit={sendMessage}>
-              <button type="button" className="attach" disabled title="Вложения — следующий этап">＋</button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                className="hidden-file-input"
+                onChange={(event) => sendAttachment(event.target.files?.[0])}
+              />
+
+              <button
+                type="button"
+                className="attach"
+                title="Фото или файл"
+                disabled={busy || recording}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                ＋
+              </button>
+
               <input
                 value={draft}
-                onChange={(event) => setDraft(event.target.value)}
-                placeholder="Написать сообщение…"
-                disabled={busy}
+                onChange={handleDraftChange}
+                placeholder={editingSeq ? 'Редактировать сообщение…' : 'Написать сообщение…'}
+                disabled={busy || recording}
               />
-              <button className="send" type="submit" disabled={busy || !draft.trim()}>➤</button>
+
+              <button
+                className={recording ? 'voice recording' : 'voice'}
+                type="button"
+                disabled={busy}
+                title="Голосовое сообщение"
+                onClick={recording ? () => stopRecording(false) : startRecording}
+              >
+                🎤
+              </button>
+
+              <button className="send" type="submit" disabled={busy || recording || !draft.trim()}>➤</button>
             </form>
           </>
         ) : (
@@ -690,9 +1165,9 @@ export default function App() {
 
             {authorized ? (
               <>
-                <p>Сервер подключён. Создай новый чат или выбери существующий слева.</p>
+                <p>Сервер подключён. Создай личный чат или группу.</p>
                 <button className="welcome-primary" onClick={() => setNewChatOpen(true)}>
-                  Найти пользователя
+                  Новый чат
                 </button>
               </>
             ) : (
@@ -851,20 +1326,66 @@ export default function App() {
       )}
 
       {newChatOpen && (
-        <div className="modal-backdrop" onMouseDown={() => setNewChatOpen(false)}>
+        <div className="modal-backdrop" onMouseDown={resetNewChat}>
           <div className="auth-card user-search-card" onMouseDown={(event) => event.stopPropagation()}>
-            <div className="auth-logo">＋</div>
-            <h2>Новый чат</h2>
-            <p>Найди пользователя по логину, email или ID.</p>
+            <div className="auth-logo">{newChatMode === 'group' ? '👥' : '＋'}</div>
+            <h2>{newChatMode === 'group' ? 'Новая группа' : 'Новый чат'}</h2>
+            <p>
+              {newChatMode === 'group'
+                ? 'Создай группу и добавь участников.'
+                : 'Найди пользователя по логину, email или ID.'}
+            </p>
+
+            <div className="auth-tabs new-chat-tabs">
+              <button
+                className={newChatMode === 'person' ? 'active' : ''}
+                onClick={() => {
+                  setNewChatMode('person');
+                  setSearchError('');
+                }}
+              >
+                Личный
+              </button>
+              <button
+                className={newChatMode === 'group' ? 'active' : ''}
+                onClick={() => {
+                  setNewChatMode('group');
+                  setSearchError('');
+                }}
+              >
+                Группа
+              </button>
+            </div>
+
+            {newChatMode === 'group' && (
+              <label>
+                Название группы
+                <input
+                  value={groupName}
+                  onChange={(event) => setGroupName(event.target.value)}
+                  placeholder="Например, Support Team"
+                />
+              </label>
+            )}
+
+            {groupMembers.length > 0 && newChatMode === 'group' && (
+              <div className="selected-members">
+                {groupMembers.map((member) => (
+                  <button type="button" key={member.user} onClick={() => toggleGroupMember(member)}>
+                    {member.name} ×
+                  </button>
+                ))}
+              </div>
+            )}
 
             <form onSubmit={searchUsers}>
               <label>
-                Поиск
+                Поиск пользователей
                 <input
                   value={userQuery}
                   onChange={(event) => setUserQuery(event.target.value)}
                   placeholder="например alex"
-                  autoFocus
+                  autoFocus={newChatMode === 'person'}
                 />
               </label>
               <button className="primary" type="submit" disabled={searchBusy || !userQuery.trim()}>
@@ -875,22 +1396,44 @@ export default function App() {
             {searchError && <div className="auth-error">{searchError}</div>}
 
             <div className="search-results">
-              {userResults.map((user) => (
-                <button key={user.user} className="search-result" onClick={() => startChatWith(user.user)}>
-                  <div className="avatar">{user.name.slice(0, 1).toUpperCase()}</div>
-                  <div>
-                    <strong>{user.name}</strong>
-                    <span>{user.user}</span>
-                  </div>
-                </button>
-              ))}
+              {userResults.map((user) => {
+                const selectedMember = groupMembers.some((member) => member.user === user.user);
+                return (
+                  <button
+                    key={user.user}
+                    className={selectedMember ? 'search-result selected' : 'search-result'}
+                    onClick={() => newChatMode === 'group' ? toggleGroupMember(user) : startChatWith(user.user)}
+                    type="button"
+                  >
+                    <div className="avatar">{user.name.slice(0, 1).toUpperCase()}</div>
+                    <div>
+                      <strong>{user.name}</strong>
+                      <span>{user.user}</span>
+                    </div>
+                    {newChatMode === 'group' && (
+                      <b className="member-check">{selectedMember ? '✓' : '+'}</b>
+                    )}
+                  </button>
+                );
+              })}
 
               {!searchBusy && userQuery && userResults.length === 0 && !searchError && (
                 <div className="search-placeholder">Нажми «Найти» для поиска по серверу.</div>
               )}
             </div>
 
-            <button className="ghost" type="button" onClick={() => setNewChatOpen(false)}>
+            {newChatMode === 'group' && (
+              <button
+                className="primary group-create-button"
+                type="button"
+                disabled={busy || !groupName.trim()}
+                onClick={createGroup}
+              >
+                {busy ? 'Создаём…' : `Создать группу${groupMembers.length ? ` (${groupMembers.length})` : ''}`}
+              </button>
+            )}
+
+            <button className="ghost" type="button" onClick={resetNewChat}>
               Закрыть
             </button>
           </div>
