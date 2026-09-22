@@ -8,7 +8,7 @@ const apiKey =
 
 export function createTinodeClient() {
   return new Tinode({
-    appName: 'VisionChat/0.1',
+    appName: 'VisionChat/0.2',
     host,
     apiKey,
     transport: 'ws',
@@ -17,4 +17,9 @@ export function createTinodeClient() {
   });
 }
 
-export const tinodeConfig = { host, secure };
+export const tinodeConfig = {
+  host,
+  secure,
+  apiKey,
+  httpBase: `${secure ? 'https' : 'http'}://${host}`,
+};
