@@ -102,13 +102,26 @@ if not defined PGPASSWORD (
 
 echo [2/5] Preparing Tinode for Windows...
 
+if not exist "%TINODEROOT%" (
+  mkdir "%TINODEROOT%" >nul 2>nul
+)
+
 set "TINODEEXE="
-for /r "%TINODEROOT%" %%F in (tinode.exe) do (
-  if not defined TINODEEXE set "TINODEEXE=%%F"
+
+if exist "%TINODEROOT%\tinode.exe" (
+  set "TINODEEXE=%TINODEROOT%\tinode.exe"
+) else (
+  for /f "delims=" %%F in ('dir /s /b "%TINODEROOT%\tinode.exe" 2^>nul') do (
+    if not defined TINODEEXE set "TINODEEXE=%%F"
+  )
 )
 
 if not defined TINODEEXE (
+  echo       Tinode executable not found locally.
   echo       Downloading Tinode %TINODEVER%...
+
+  if exist "%TINODEZIP%" del /f /q "%TINODEZIP%" >nul 2>nul
+
   curl.exe -L --fail --retry 3 -o "%TINODEZIP%" "%TINODEURL%"
   if errorlevel 1 (
     echo.
@@ -128,9 +141,20 @@ if not defined TINODEEXE (
     exit /b 5
   )
 
-  for /r "%TINODEROOT%" %%F in (tinode.exe) do (
-    if not defined TINODEEXE set "TINODEEXE=%%F"
+  if exist "%TINODEROOT%\tinode.exe" (
+    set "TINODEEXE=%TINODEROOT%\tinode.exe"
+  ) else (
+    for /f "delims=" %%F in ('dir /s /b "%TINODEROOT%\tinode.exe" 2^>nul') do (
+      if not defined TINODEEXE set "TINODEEXE=%%F"
+    )
   )
+)
+
+if not exist "%TINODEROOT%" (
+  echo [ERROR] Tinode directory was not created:
+  echo   %TINODEROOT%
+  pause
+  exit /b 6
 )
 
 if not defined TINODEEXE (
@@ -140,8 +164,12 @@ if not defined TINODEEXE (
 )
 
 set "INITDB="
-for /r "%TINODEROOT%" %%F in (init-db.exe) do (
-  if not defined INITDB set "INITDB=%%F"
+if exist "%TINODEROOT%\init-db.exe" (
+  set "INITDB=%TINODEROOT%\init-db.exe"
+) else (
+  for /f "delims=" %%F in ('dir /s /b "%TINODEROOT%\init-db.exe" 2^>nul') do (
+    if not defined INITDB set "INITDB=%%F"
+  )
 )
 
 if not defined INITDB (
@@ -153,6 +181,9 @@ if not defined INITDB (
 for %%D in ("%TINODEEXE%") do set "TINODEDIR=%%~dpD"
 for %%D in ("%INITDB%") do set "INITDIR=%%~dpD"
 
+echo       Tinode root: %TINODEROOT%
+echo       Tinode exe:  !TINODEEXE!
+echo       Init DB exe: !INITDB!
 echo       Applying PostgreSQL settings...
 node.exe "%~dp0tools\Configure-Tinode-Postgres.mjs" "%TINODEROOT%" "!PGPASSWORD!"
 if errorlevel 1 (
