@@ -1,20 +1,27 @@
 # VisionChat
 
-VisionChat is a custom messenger project built on top of the open-source Tinode messaging stack.
+VisionChat is a custom messenger built on top of the open-source Tinode messaging stack with its own web UI and an Android client.
 
 ## What already works
 
 - custom VisionChat web UI
 - Tinode server + PostgreSQL in Docker
-- registration and login
-- local email verification flow
-- real server-side user accounts
-- user search by login/email
-- real P2P chat creation
-- real-time message send/receive
-- contact/chat list from Tinode
+- registration, login, local development verification
+- real server-side accounts and user search
+- P2P chats and real-time messaging
+- group creation with member invites
+- photos and generic file attachments
+- browser voice-message recording and playback
+- reply, edit and delete actions
+- typing notifications
+- sent/delivered/read indicators
+- WebRTC audio and video calls for P2P chats
+- incoming call accept/reject UI
+- microphone/camera controls during calls
+- first Android client with camera, microphone and file-picker support
 - Windows one-click development launcher
-- GitHub Actions build check
+- GitHub Actions checks for web, backend and Android
+- downloadable CI artifacts for the web build and debug APK
 
 ## Quick start on Windows
 
@@ -39,34 +46,34 @@ Web UI:  http://localhost:5173
 Tinode:  http://localhost:6060
 ```
 
-## Manual start
-
-```bash
-copy .env.example .env
-docker compose up -d
-npm install
-npm run dev
-```
-
 ## Test two real users
 
 1. Open VisionChat in the normal browser window.
 2. Register the first user.
 3. Open an Incognito/Private window.
 4. Register a second user.
-5. In local development, if Tinode asks for an email confirmation code, use the configured value from `.env` (default: `123456`).
-6. Press **Новый чат**, search the other user by login, open the result, and send a message.
+5. In local development, if Tinode asks for an email confirmation code, use the configured development code.
+6. Create a chat and test text, photo/file, voice, reply/edit/delete and typing/read status.
+7. Use the phone/video buttons in a P2P chat to test WebRTC calls.
+
+## Android
+
+Open the `android/` directory in Android Studio. See `android/README.md`.
+
+The first Android version is a native Android shell around the VisionChat web client. It is useful for testing the full current feature set on a phone immediately. A fully native Tinode/Tindroid-derived VisionChat client is a later step.
+
+GitHub Actions also builds a debug APK and publishes it as the `VisionChat-Android-debug` workflow artifact.
 
 ## Architecture
 
 ```text
-VisionChat Web (React + Vite)
-        |
-   tinode-sdk
-        |
-Tinode Server (Go)
-        |
-   PostgreSQL
+VisionChat Web / Android shell
+            |
+        tinode-sdk
+            |
+     Tinode Server (Go)
+            |
+        PostgreSQL
 ```
 
 ## Important production notes
@@ -75,30 +82,22 @@ The current repository is a development build. Before exposing it to the interne
 
 - generate your own Tinode API key
 - replace Tinode default UID/token encryption keys
-- replace the PostgreSQL password
-- remove the development email verification code
-- enable HTTPS/TLS
+- replace development database credentials
+- remove the development verification shortcut
+- enable HTTPS/WSS
 - configure backups
-- add rate limiting / abuse controls
-- configure TURN/STUN for calls
+- add rate limiting and abuse controls
+- deploy STUN/TURN for reliable calls across the internet
+- configure push notifications
 - perform a security review
 
-Do not claim end-to-end encryption yet. This starter does not implement E2EE.
+Do not claim end-to-end encryption yet. VisionChat does not currently implement E2EE.
 
 ## Upstream projects
 
 - Tinode server: https://github.com/tinode/chat
 - Tinode JavaScript SDK: https://github.com/tinode/tinode-js
 - Tinode reference web client: https://github.com/tinode/webapp
+- Tinode Android client (Tindroid): https://github.com/tinode/tindroid
 
 Keep applicable upstream license and attribution requirements when redistributing modified software.
-
-## Next stage
-
-- file/image attachments
-- voice messages
-- groups
-- typing/read indicators
-- push notifications
-- calls
-- Android client
