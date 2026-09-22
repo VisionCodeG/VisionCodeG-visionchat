@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 chcp 65001 >nul
-title VisionChat - Native Windows (No PowerShell scripts)
+title VisionChat - Native Windows (No Docker)
 
 cd /d "%~dp0"
 
@@ -12,9 +12,17 @@ echo   Docker / WSL / Hyper-V / .ps1 scripts are NOT required
 echo ============================================================
 echo.
 
+where node.exe >nul 2>nul
+if errorlevel 1 (
+  echo [ERROR] Node.js was not found.
+  echo Install Node.js 20+ and run this file again.
+  pause
+  exit /b 1
+)
+
 where npm.cmd >nul 2>nul
 if errorlevel 1 (
-  echo [ERROR] Node.js / npm not found.
+  echo [ERROR] npm was not found.
   echo Install Node.js 20+ and run this file again.
   pause
   exit /b 1
@@ -23,7 +31,6 @@ if errorlevel 1 (
 where curl.exe >nul 2>nul
 if errorlevel 1 (
   echo [ERROR] curl.exe not found.
-  echo Windows 10/11 normally includes curl.
   pause
   exit /b 1
 )
@@ -31,10 +38,19 @@ if errorlevel 1 (
 where tar.exe >nul 2>nul
 if errorlevel 1 (
   echo [ERROR] tar.exe not found.
-  echo Windows 10/11 normally includes tar.
   pause
   exit /b 1
 )
+
+set "NATIVE=%~dp0.native"
+set "TINODEROOT=%NATIVE%\tinode"
+set "TINODEZIP=%NATIVE%\tinode-postgres.windows-amd64.zip"
+set "PGPASSFILE=%NATIVE%\postgres-password.txt"
+set "PATHSFILE=%TINODEROOT%\visionchat-native-paths.txt"
+set "TINODEVER=v0.25.3"
+set "TINODEURL=https://github.com/tinode/chat/releases/download/%TINODEVER%/tinode-postgres.windows-amd64.zip"
+
+if not exist "%NATIVE%" mkdir "%NATIVE%" >nul 2>nul
 
 echo [1/5] Checking PostgreSQL...
 
@@ -55,12 +71,6 @@ if not defined PGREADY (
   echo.
   echo [ERROR] PostgreSQL was not found.
   echo Install PostgreSQL 13 or newer for Windows.
-  echo.
-  echo Development settings expected by VisionChat:
-  echo   User:     postgres
-  echo   Password: postgres
-  echo   Port:     5432
-  echo.
   pause
   exit /b 2
 )
@@ -69,21 +79,26 @@ if not defined PGREADY (
 if errorlevel 1 (
   echo.
   echo [ERROR] PostgreSQL is installed but is not responding on localhost:5432.
-  echo Open services.msc and start the PostgreSQL service, then run this BAT again.
-  echo.
+  echo Open services.msc and start the PostgreSQL service.
   pause
   exit /b 3
 )
 
 echo       PostgreSQL OK.
 
-set "NATIVE=%~dp0.native"
-set "TINODEROOT=%NATIVE%\tinode"
-set "TINODEZIP=%NATIVE%\tinode-postgres.windows-amd64.zip"
-set "TINODEVER=v0.25.3"
-set "TINODEURL=https://github.com/tinode/chat/releases/download/%TINODEVER%/tinode-postgres.windows-amd64.zip"
+set "PGPASSWORD="
+if exist "%PGPASSFILE%" (
+  set /p PGPASSWORD=<"%PGPASSFILE%"
+)
 
-if not exist "%NATIVE%" mkdir "%NATIVE%" >nul 2>nul
+if not defined PGPASSWORD (
+  echo.
+  echo Enter the password you selected for PostgreSQL user "postgres".
+  set /p "PGPASSWORD=PostgreSQL password: "
+  if not defined PGPASSWORD set "PGPASSWORD=postgres"
+  >"%PGPASSFILE%" echo(!PGPASSWORD!
+  echo       Password saved locally in .native\postgres-password.txt
+)
 
 echo [2/5] Preparing Tinode for Windows...
 
@@ -124,8 +139,6 @@ if not defined TINODEEXE (
   exit /b 6
 )
 
-for %%D in ("%TINODEEXE%") do set "TINODEDIR=%%~dpD"
-
 set "INITDB="
 for /r "%TINODEROOT%" %%F in (init-db.exe) do (
   if not defined INITDB set "INITDB=%%F"
@@ -137,28 +150,78 @@ if not defined INITDB (
   exit /b 7
 )
 
+for %%D in ("%TINODEEXE%") do set "TINODEDIR=%%~dpD"
+for %%D in ("%INITDB%") do set "INITDIR=%%~dpD"
+
+echo       Applying PostgreSQL settings...
+node.exe "%~dp0tools\Configure-Tinode-Postgres.mjs" "%TINODEROOT%" "!PGPASSWORD!"
+if errorlevel 1 (
+  echo.
+  echo [ERROR] Failed to configure Tinode for PostgreSQL.
+  pause
+  exit /b 8
+)
+
+set "DB_CONFIG="
+set "SERVER_CONFIG="
+if exist "%PATHSFILE%" (
+  for /f "usebackq tokens=1,* delims==" %%A in ("%PATHSFILE%") do (
+    if /i "%%A"=="DB_CONFIG" set "DB_CONFIG=%%B"
+    if /i "%%A"=="SERVER_CONFIG" set "SERVER_CONFIG=%%B"
+  )
+)
+
+if not defined DB_CONFIG (
+  echo [ERROR] Tinode database config was not detected.
+  pause
+  exit /b 8
+)
+
+if not defined SERVER_CONFIG (
+  echo [ERROR] Tinode server config was not detected.
+  pause
+  exit /b 8
+)
+
+echo       DB config: !DB_CONFIG!
+echo       Server config: !SERVER_CONFIG!
+
 echo [3/5] Checking Tinode database...
 
-pushd "%TINODEDIR%"
-"%INITDB%" --no_init >nul 2>nul
+set "DATAFILE="
+for /r "%TINODEROOT%" %%F in (data.json) do (
+  if not defined DATAFILE set "DATAFILE=%%F"
+)
+
+pushd "%INITDIR%"
+"%INITDB%" -config="!DB_CONFIG!" --no_init >nul 2>nul
 if errorlevel 1 (
-  echo       Initializing database...
-  if exist "%TINODEDIR%data.json" (
-    "%INITDB%" -data="%TINODEDIR%data.json"
+  echo       Database is missing or not initialized. Initializing...
+
+  if defined DATAFILE (
+    "%INITDB%" -config="!DB_CONFIG!" -data="!DATAFILE!"
   ) else (
-    "%INITDB%"
+    "%INITDB%" -config="!DB_CONFIG!"
   )
 
   if errorlevel 1 (
     echo.
     echo [ERROR] Tinode database initialization failed.
-    echo Most commonly PostgreSQL password is not "postgres".
-    echo Expected development connection:
-    echo   postgres / postgres @ localhost:5432
+    echo.
+    echo PostgreSQL connection used:
+    echo   Host: localhost
+    echo   Port: 5432
+    echo   User: postgres
+    echo   Password: the value saved in .native\postgres-password.txt
+    echo.
+    echo If the password is wrong:
+    echo   1. Delete .native\postgres-password.txt
+    echo   2. Run this BAT again
+    echo   3. Enter the correct PostgreSQL password
     echo.
     popd
     pause
-    exit /b 8
+    exit /b 9
   )
 ) else (
   echo       Tinode database already exists.
@@ -169,7 +232,7 @@ echo [4/5] Starting Tinode...
 
 curl.exe -s --max-time 1 http://localhost:6060/ >nul 2>nul
 if errorlevel 1 (
-  start "VisionChat Tinode" /D "%TINODEDIR%" "%TINODEEXE%"
+  start "VisionChat Tinode" /D "%TINODEDIR%" "%TINODEEXE%" -config="!SERVER_CONFIG!"
 )
 
 set /a WAIT=0
@@ -182,7 +245,7 @@ if !WAIT! GEQ 30 (
   echo [ERROR] Tinode did not start on port 6060.
   echo Check the "VisionChat Tinode" window for the exact error.
   pause
-  exit /b 9
+  exit /b 10
 )
 timeout /t 1 /nobreak >nul
 goto wait_tinode
@@ -203,7 +266,7 @@ if not exist "node_modules" (
     echo.
     echo [ERROR] npm install failed.
     pause
-    exit /b 10
+    exit /b 11
   )
 )
 
