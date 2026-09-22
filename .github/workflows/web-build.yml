@@ -30,10 +30,25 @@ jobs:
       - name: Start Tinode stack
         run: docker compose up -d
 
-      - name: Wait for Tinode
+      - name: Wait for Tinode health
         run: |
-          docker compose ps
-          curl --fail --retry 20 --retry-delay 2 --retry-connrefused http://localhost:6060/ > /dev/null
+          for i in $(seq 1 45); do
+            STATUS="$(docker inspect --format='{{.State.Health.Status}}' visionchat-server 2>/dev/null || true)"
+            echo "Tinode health: ${STATUS:-unknown}"
+            if [ "$STATUS" = "healthy" ]; then
+              exit 0
+            fi
+            if [ "$STATUS" = "unhealthy" ]; then
+              docker compose logs tinode
+              exit 1
+            fi
+            sleep 2
+          done
+          docker compose logs tinode
+          exit 1
+
+      - name: HTTP smoke test
+        run: curl --fail --retry 10 --retry-delay 1 --retry-all-errors http://localhost:6060/ > /dev/null
 
       - name: Stop Tinode stack
         if: always()
