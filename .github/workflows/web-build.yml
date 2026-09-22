@@ -1,4 +1,4 @@
-name: Web build
+name: VisionChat CI
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 jobs:
-  build:
+  build-and-smoke-test:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -23,3 +23,18 @@ jobs:
 
       - name: Build VisionChat
         run: npm run build
+
+      - name: Prepare local environment
+        run: cp .env.example .env
+
+      - name: Start Tinode stack
+        run: docker compose up -d
+
+      - name: Wait for Tinode
+        run: |
+          docker compose ps
+          curl --fail --retry 20 --retry-delay 2 --retry-connrefused http://localhost:6060/ > /dev/null
+
+      - name: Stop Tinode stack
+        if: always()
+        run: docker compose down -v
