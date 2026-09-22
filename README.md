@@ -25,19 +25,38 @@ VisionChat is a custom messenger built on top of the open-source Tinode messagin
 
 ## Quick start on Windows
 
+VisionChat now has two local launch modes.
+
+### Native Windows mode — recommended if Docker does not work
+
 Requirements:
 
-- Docker Desktop
-- Node.js 22 recommended
+- PostgreSQL 13+ installed on Windows
+- Node.js 20+ (22 recommended)
 - Git
+- no Docker, WSL, Hyper-V or CPU virtualization is required
 
-Clone the repository, then run:
+For the current development setup PostgreSQL should use:
+
+```text
+user: postgres
+password: postgres
+port: 5432
+```
+
+Run:
 
 ```bat
 start-visionchat.bat
 ```
 
-The launcher creates `.env` from `.env.example`, starts PostgreSQL + Tinode, installs npm dependencies on first run, then starts the web client.
+and choose **1**. You can also run `start-visionchat-native.bat` directly.
+
+The native launcher checks PostgreSQL, downloads the latest official Tinode PostgreSQL Windows binary into the ignored `.native/` folder, initializes the Tinode database if needed, starts Tinode on port 6060, installs npm dependencies when needed, and starts VisionChat.
+
+### Docker mode
+
+Run `start-visionchat.bat` and choose **2**, or start `start-visionchat-docker.bat` directly.
 
 Open:
 
