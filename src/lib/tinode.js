@@ -5,6 +5,7 @@ const secure = String(import.meta.env.VITE_TINODE_SECURE || 'false').toLowerCase
 const apiKey =
   import.meta.env.VITE_TINODE_API_KEY ||
   'AQEAAAABAAD_rAp4DJh05a1HAwFT3A6K';
+const mediaBase = import.meta.env.VITE_TINODE_MEDIA_BASE || '';
 
 export function createTinodeClient() {
   return new Tinode({
@@ -21,5 +22,6 @@ export const tinodeConfig = {
   host,
   secure,
   apiKey,
+  mediaBase,
   httpBase: `${secure ? 'https' : 'http'}://${host}`,
 };
